@@ -29,6 +29,7 @@
 ;;;    container.
 ;;;      SRC     → (:code-block lang lines); lang = first word of ARGS, NIL
 ;;;                if none or it starts with - or : (switches, headers).
+;;;                Babel's :exports decides what shows (EXPORTS below).
 ;;;      EXAMPLE → (:code-block nil lines).
 ;;;                Content lines verbatim, except: their common smallest
 ;;;                indentation is removed, and the comma escaping a leading
@@ -93,7 +94,24 @@
 ;;;  - Not supported: footnotes ([fn:…] stays text), LaTeX fragments and
 ;;;    environments (text), inline tasks, babel calls, #+INCLUDE (a
 ;;;    keyword), internal links ([[*Heading]] is a link with that target),
-;;;    the ARCHIVE tag, export options (#+OPTIONS is just a keyword).
+;;;    the ARCHIVE tag, export options (#+OPTIONS is a keyword; the
+;;;    caller applies ORG-OPTIONS).
+;;;  - EXPORTS (org-babel's, as at export with no evaluation). A SRC
+;;;    block's :exports is the word after its last :exports header
+;;;    argument; else the default the document's #+PROPERTY: lines give:
+;;;    header-args:LANG for the block's language, then header-args; else
+;;;    "code". Those lines count anywhere outside #+BEGIN blocks, in
+;;;    order: header-args[:LANG] replaces the value (none when it holds no
+;;;    :exports), header-args+[:LANG] only overrides it when it holds one.
+;;;    Property drawers' header-args are not read.
+;;;      none     the block and its results are dropped
+;;;      code     the block stays, its results are dropped
+;;;      results  the block is dropped, its results stay
+;;;      both, anything else   both stay (Org leaves the block as is)
+;;;    The results: when the first non-blank line after the block is
+;;;    #+RESULTS: (or #+RESULTS[hash]:), the element on the line right
+;;;    after it (not a heading or a blank line, else there are none). The
+;;;    #+RESULTS: line is dropped either way.
 ;;;  - Content inside more than 64 nested containers becomes one paragraph
 ;;;    of its text (lines trimmed, blank lines dropped), and emphasis
 ;;;    inside more than 64 nested emphases or links stays text, so no
@@ -104,6 +122,7 @@
 ;;; items count). Key downcased, value trimmed; a repeated key appears
 ;;; again. Dropped and not collected: caption, name, results, header, plot,
 ;;; tblfm and attr_* (an optional [..] after the key is ignored).
+;;; ORG-OPTIONS reads the #+OPTIONS words (toc:t H:3 email:t) of KEYWORDS.
 ;;;
 ;;; INLINES (one left-to-right scan; at each position the first object that
 ;;; parses wins, in this order):
@@ -119,11 +138,12 @@
 ;;;    or an empty target is no link. The description ends at the first ]]
 ;;;    outside balanced brackets (else the first ]]); an empty one counts
 ;;;    as none. In target and description \[ \] \\ → [ ] \, and a newline
-;;;    with its blanks → one space (in the target). A file: prefix is
-;;;    stripped from targets. The description is parsed inline without
-;;;    links: only image links [[x.png]] parse there (→ :image); a whole
-;;;    description that is a file: or http(s) image link ([[page][file:t.png]])
-;;;    → ((:image "t.png" ())).
+;;;    with its blanks → one space (in the target). A file:, file+sys: or
+;;;    file+emacs: prefix is stripped from targets. The description is
+;;;    parsed inline without links: only image links [[x.png]] parse there
+;;;    (→ :image); a whole description that is a file link (any of those
+;;;    prefixes) or http(s) image link ([[page][file:t.png]]) →
+;;;    ((:image "t.png" ())).
 ;;;  - Angle links <https://…>, <http://…>, <mailto:…> → (:link url (url)),
 ;;;    brackets dropped; up to the first > with no < or newline before it.
 ;;;  - Plain links https://… http://… mailto:… (lowercase, not after a
@@ -163,11 +183,37 @@ Keywords: ((key . value) …) in source order, key downcased, value trimmed.
 Adjacent strings are merged and empty strings dropped, so results compare
 with EQUAL."
   (check-type string string)
-  (let ((*keywords* '())
-        (*collect-keywords* t)
-        (*in-item* nil)
-        (*depth* 0)
-        (*inline-depth* 0)
-        (*line-searches* (make-hash-table :test 'eq)))
-    (let ((blocks (values (%parse-blocks (%source-lines string)))))
+  (let* ((lines (%source-lines string))
+         (*keywords* '())
+         (*collect-keywords* t)
+         (*in-item* nil)
+         (*depth* 0)
+         (*inline-depth* 0)
+         (*line-searches* (make-hash-table :test 'eq))
+         (*exports-defaults* (%exports-defaults lines)))
+    (let ((blocks (values (%parse-blocks lines))))
       (values blocks (reverse *keywords*)))))
+
+(defun %option-value (raw)
+  (cond ((string-equal raw "t") t)
+        ((string-equal raw "nil") nil)
+        ((and (plusp (length raw)) (every #'%digit-p raw)) (parse-integer raw))
+        (t raw)))
+
+(defun org-options (keywords)
+  "The export options in KEYWORDS' #+OPTIONS lines (KEYWORDS as PARSE-ORG
+returns them), merged in order so a later word wins → an alist (name .
+value), names as written. A word NAME:VALUE splits at its last colon;
+VALUE t → T, nil → NIL, digits → an integer, else the string. Words with
+no colon or an empty name are skipped. (Org's own defaults are not added.)"
+  (check-type keywords list)
+  (let ((options '()))
+    (loop for (key . value) in keywords
+          when (equal key "options")
+            do (dolist (word (%words value))
+                 (let ((colon (position #\: word :from-end t)))
+                   (when (and colon (plusp colon))
+                     (let ((name (subseq word 0 colon)))
+                       (setf options (remove name options :key #'car :test #'string=))
+                       (push (cons name (%option-value (subseq word (1+ colon)))) options))))))
+    (nreverse options)))

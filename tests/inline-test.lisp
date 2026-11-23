@@ -84,6 +84,15 @@
   (ok (equal '("[[]] [[][x]]") (pi* "[[]] [[][x]]")) "empty targets")
   (ok (equal '("[x] [fn:1] [2/3] [[u]") (pi* "[x] [fn:1] [2/3] [[u]")) "not links"))
 
+(deftest inline-file-link-types
+  (ok (equal '((:link "requests.org" ("Requests"))) (pi* "[[file+emacs:requests.org][Requests]]"))
+      "file+emacs: stripped")
+  (ok (equal '((:link "notes.pdf" ("notes.pdf"))) (pi* "[[file+sys:notes.pdf]]")) "file+sys: stripped")
+  (ok (equal '((:image "a.png" ())) (pi* "[[file+emacs:a.png]]")) "an image")
+  (ok (equal '((:link "x.org" ((:image "t.png" ())))) (pi* "[[file+sys:x.org][file+emacs:t.png]]"))
+      "a description that is a file+ image link")
+  (ok (equal '((:link "filex:y" ("filex:y"))) (pi* "[[filex:y]]")) "other link types kept"))
+
 (deftest inline-plain-and-angle-links
   (ok (equal '("see " (:link "https://example.com/a_b" ("https://example.com/a_b")) ".")
              (pi* "see https://example.com/a_b."))

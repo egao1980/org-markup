@@ -313,20 +313,38 @@ non-blank after the bullet, or the bullet end + 1 when the rest is blank."
 
 (defun %parse-blocks (lines &optional (start 0) (end (length lines)))
   "Parse LINES[START, END) → (values blocks gap-p); GAP-P is true when a
-blank line separates two of these blocks."
+blank line separates two of these blocks. A #+RESULTS: line after a SRC
+block (blank lines between) introduces its results: the element on the
+next line, kept or dropped as the block's :exports says."
   (let ((blocks '())
         (gap nil)
         (blank-pending nil)
+        (results nil)
         (i start))
-    (loop while (< i end)
-          do (if (%blank-p (svref lines i))
-                 (progn (setf blank-pending t) (incf i))
-                 (multiple-value-bind (new next) (%parse-element lines i end)
-                   (dolist (b new)
-                     (when (and blank-pending blocks) (setf gap t))
-                     (setf blank-pending nil)
-                     (push b blocks))
-                   (setf i next))))
+    (flet ((emit (new)
+             (dolist (b new)
+               (when (and blank-pending blocks) (setf gap t))
+               (setf blank-pending nil)
+               (push b blocks))))
+      (loop while (< i end)
+            do (let ((line (svref lines i)))
+                 (cond ((%blank-p line)
+                        (setf blank-pending t)
+                        (incf i))
+                       ((and results (%results-line-p line))
+                        (incf i)
+                        (when (and (< i end)
+                                   (not (%blank-p (svref lines i)))
+                                   (not (%heading (svref lines i))))
+                          (multiple-value-bind (new next) (%parse-element lines i end)
+                            (when (eq results :keep) (emit new))
+                            (setf i next)))
+                        (setf results nil))
+                       (t
+                        (multiple-value-bind (new next src-results) (%parse-element lines i end)
+                          (emit new)
+                          (setf i next
+                                results src-results)))))))
     (values (nreverse blocks) gap)))
 
 (defun %flat-paragraph (lines)
@@ -398,6 +416,90 @@ gap-p)."
 
 ;;; #+BEGIN blocks
 
+(defvar *exports-defaults* '()
+  "The document's default :exports values, from its #+PROPERTY: header-args
+lines: an alist (language . value), language NIL for every language.")
+
+(defun %words (s)
+  "S split at runs of blanks."
+  (let ((words '())
+        (i 0)
+        (n (length s)))
+    (loop
+      (let ((start (position-if-not #'%blank-char-p s :start i)))
+        (unless start
+          (return (nreverse words)))
+        (let ((stop (or (position-if #'%blank-char-p s :start start) n)))
+          (push (subseq s start stop) words)
+          (setf i stop))))))
+
+(defun %header-arg (args key)
+  "→ (values value found-p) for header argument KEY (\":exports\") in ARGS,
+a #+BEGIN_SRC line's arguments or a header-args value: VALUE is the word
+after the last KEY word, downcased; NIL when nothing or another :key
+follows."
+  (let ((value nil)
+        (found nil))
+    (loop for (word . rest) on (%words args)
+          when (string-equal word key)
+            do (let ((next (first rest)))
+                 (setf found t
+                       value (and next (char/= (char next 0) #\:) (string-downcase next)))))
+    (values value found)))
+
+(defun %header-args-property (value)
+  "VALUE of a #+PROPERTY: line → (values language plus args) when it sets
+header-args (LANGUAGE NIL), header-args:LANG, or their + forms; else NIL."
+  (let* ((name (first (%words value)))
+         (k (length "header-args")))
+    (when (and name (%prefix-at-p "header-args" (string-downcase name) 0 (length name)))
+      (let* ((rest (subseq name k))
+             (plus (and (plusp (length rest)) (char= (char rest 0) #\+)))
+             (rest (if plus (subseq rest 1) rest)))
+        (when (or (zerop (length rest))
+                  (and (> (length rest) 1) (char= (char rest 0) #\:)))
+          (values (and (plusp (length rest)) (subseq rest 1))
+                  plus
+                  (subseq value (+ (search name value) (length name)))))))))
+
+(defun %exports-defaults (lines)
+  "The default :exports per language set by LINES' #+PROPERTY: header-args
+lines outside #+BEGIN blocks, in order. header-args and header-args:LANG
+replace the value (none when they hold no :exports); the + forms only
+override it when they hold one. → an alist for *EXPORTS-DEFAULTS*."
+  (let ((defaults '())
+        (open nil))
+    (loop for line across lines
+          do (cond (open
+                    (when (%block-end-p line open) (setf open nil)))
+                   ((%block-begin line)
+                    (setf open (%block-begin line)))
+                   (t
+                    (multiple-value-bind (key value) (%keyword-line line)
+                      (when (equal key "property")
+                        (multiple-value-bind (language plus args) (%header-args-property value)
+                          (when args
+                            (multiple-value-bind (exports found) (%header-arg args ":exports")
+                              (when (or found (not plus))
+                                (setf defaults
+                                      (remove language defaults :key #'car :test #'equal))
+                                (when exports
+                                  (push (cons language exports) defaults)))))))))))
+    defaults))
+
+(defun %src-exports (language args)
+  "A SRC block's :exports value: its own header argument, else the document
+default for LANGUAGE, else for every language, else \"code\" (Org's)."
+  (or (%header-arg args ":exports")
+      (and language (cdr (assoc language *exports-defaults* :test #'equal)))
+      (cdr (assoc nil *exports-defaults*))
+      "code"))
+
+(defun %results-line-p (line)
+  "Is LINE a #+RESULTS: (or #+RESULTS[hash]:) keyword line?"
+  (let ((key (%keyword-line line)))
+    (and key (string= "results" (subseq key 0 (or (position #\[ key) (length key)))))))
+
 (defun %src-language (args)
   "The first word of a #+BEGIN_SRC line's ARGS, NIL when there is none or it
 is a switch (-n) or header argument (:results)."
@@ -443,12 +545,19 @@ empty."
                            when more collect (list :hard-break)))))))))
 
 (defun %parse-block (lines i end)
+  "→ (values blocks next results): RESULTS is :keep or :drop for a SRC
+block (what happens to the #+RESULTS: element after it), else NIL."
   (multiple-value-bind (name args) (%block-begin (svref lines i))
     (let* ((close (%find-block-end lines name (1+ i) end))
-           (body (subseq lines (1+ i) (or close end))))
+           (body (subseq lines (1+ i) (or close end)))
+           (results nil))
       (values
        (cond ((equal name "src")
-              (list (list :code-block (%src-language args) (%verbatim-lines body))))
+              (let* ((language (%src-language args))
+                     (exports (%src-exports language args)))
+                (setf results (if (member exports '("none" "code") :test #'string=) :drop :keep))
+                (unless (member exports '("none" "results") :test #'string=)
+                  (list (list :code-block language (%verbatim-lines body))))))
              ((equal name "example")
               (list (list :code-block nil (%verbatim-lines body))))
              ((equal name "quote")
@@ -457,7 +566,8 @@ empty."
              ((member name '("export" "comment") :test #'equal) '())
              ;; center, dynamic and other special blocks: contents spliced in
              (t (values (%parse-container body :collect nil))))
-       (if close (1+ close) end)))))
+       (if close (1+ close) end)
+       results))))
 
 ;;; Tables
 
