@@ -1,5 +1,5 @@
 (defsystem "org-markup"
-  :version "0.1.0"
+  :version "0.1.1"
   :description "Org-mode subset parser producing the markdown-protocol plain-list block / inline AST, plus #+KEYWORD metadata"
   :author "egao1980"
   :license "MIT"
@@ -19,6 +19,7 @@
                (:file "block-test")
                (:file "inline-test")
                (:file "keyword-test")
+               (:file "babel-test")
                (:file "document-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)

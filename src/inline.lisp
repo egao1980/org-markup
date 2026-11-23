@@ -119,10 +119,18 @@ at most one newline in between. CACHE is the SCAN-CACHE of S."
 
 (defparameter *image-extensions* '(".png" ".jpg" ".jpeg" ".gif" ".svg" ".webp"))
 
+(defparameter *file-link-prefixes* '("file:" "file+sys:" "file+emacs:")
+  "Org's file link types: the prefix is stripped, the path kept.")
+
+(defun %file-prefix-length (target)
+  "The length of TARGET's file:, file+sys: or file+emacs: prefix, else NIL."
+  (let ((p (find-if (lambda (p) (%prefix-at-p p target 0 (length target)))
+                    *file-link-prefixes*)))
+    (and p (length p))))
+
 (defun %strip-file-prefix (target)
-  (if (%prefix-at-p "file:" target 0 (length target))
-      (subseq target 5)
-      target))
+  (let ((k (%file-prefix-length target)))
+    (if k (subseq target k) target)))
 
 (defun %image-target-p (target)
   "Does TARGET (a file: prefix already stripped) name an image?"
@@ -133,11 +141,11 @@ at most one newline in between. CACHE is the SCAN-CACHE of S."
           *image-extensions*)))
 
 (defun %image-description-p (desc)
-  "A description that is itself a file: or http(s) link to an image
-(org's [[page][file:thumb.png]] idiom)."
+  "A description that is itself a file (file:, file+sys:, file+emacs:) or
+http(s) link to an image (org's [[page][file:thumb.png]] idiom)."
   (and (plusp (length desc))
        (notany #'%ws-p desc)
-       (or (%prefix-at-p "file:" desc 0 (length desc))
+       (or (%file-prefix-length desc)
            (%prefix-at-p "https://" desc 0 (length desc))
            (%prefix-at-p "http://" desc 0 (length desc)))
        (%image-target-p (%strip-file-prefix desc))))
